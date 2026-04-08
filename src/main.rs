@@ -1,13 +1,80 @@
-use actix_web::{App, HttpServer};
-use actix_web_prometheus::PrometheusMetricsBuilder;
+use actix_web::{get, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::{Context, Result};
-use prometheus::{Gauge, Registry};
+use prometheus::{Encoder, Gauge, Registry, TextEncoder};
+use regex::Regex;
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS, Transport};
+use serde::Deserialize;
 use std::collections::HashMap;
-use std::env;
+use std::{env, fs};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::{error};
+
+#[derive(Debug, Deserialize, Clone)]
+struct MetricConfig {
+    topic: String,
+    name: String,
+    help: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Config {
+    metrics: Vec<MetricConfig>,
+}
+
+fn get_default_metrics() -> Vec<MetricConfig> {
+    vec![
+        MetricConfig {
+            topic: "$SYS/broker/uptime".into(),
+            name: "mqtt_uptime_seconds".into(),
+            help: "Broker uptime".into(),
+        },
+        MetricConfig {
+            topic: "$SYS/broker/bytes/sent".into(),
+            name: "mqtt_bytes_sent_total".into(),
+            help: "Total bytes sent".into(),
+        },
+        MetricConfig {
+            topic: "$SYS/broker/bytes/received".into(),
+            name: "mqtt_bytes_received_total".into(),
+            help: "Total bytes received".into(),
+        },
+        MetricConfig {
+            topic: "$SYS/broker/messages/sent".into(),
+            name: "mqtt_messages_sent_total".into(),
+            help: "Total messages sent".into(),
+        },
+        MetricConfig {
+            topic: "$SYS/broker/messages/received".into(),
+            name: "mqtt_messages_received_total".into(),
+            help: "Total messages received".into(),
+        },
+        MetricConfig {
+            topic: "$SYS/broker/load/bytes/sent/1min".into(),
+            name: "mqtt_load_bytes_sent_1min".into(),
+            help: "Average bytes sent per minute".into(),
+        },
+        MetricConfig {
+            topic: "$SYS/broker/load/bytes/received/1min".into(),
+            name: "mqtt_load_bytes_received_1min".into(),
+            help: "Average bytes received per minute".into(),
+        },
+        MetricConfig {
+            topic: "$SYS/broker/connections/socket/count".into(),
+            name: "mqtt_socket_count".into(),
+            help: "Current socket count".into(),
+        },
+    ]
+}
+
+#[get("/metrics")]
+async fn metrics_handler(registry: web::Data<Registry>) -> impl Responder {
+    let encoder = TextEncoder::new();
+    let mut buffer = Vec::new();
+    let metric_families = registry.gather();
+    encoder.encode(&metric_families, &mut buffer).unwrap();
+    HttpResponse::Ok().content_type("text/plain").body(buffer)
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -15,7 +82,13 @@ async fn main() -> Result<()> {
     let log_level = env::var("LOGLEVEL").unwrap_or_else(|_| "info".into());
     tracing_subscriber::fmt().with_env_filter(log_level).init();
 
-    info!("Starting Mosquitto Exporter (TLS fixed)...");
+    let config_path = "/config.yml";
+    let metrics_configs = if let Ok(content) = fs::read_to_string(config_path) {
+        let cfg: Config = serde_yaml::from_str(&content).context("Failed to parse config.yml")?;
+        cfg.metrics
+    } else {
+        get_default_metrics()
+    };
 
     let mqtt_url = env::var("MQTT_HOST").unwrap_or_else(|_| "tcp://127.0.0.1".to_string());
     let mqtt_port = env::var("MQTT_PORT").unwrap_or_else(|_| "1883".to_string()).parse::<u16>()?;
@@ -31,21 +104,14 @@ async fn main() -> Result<()> {
     mqttoptions.set_keep_alive(Duration::from_secs(5));
 
     if is_tls {
-        info!("TLS detected. Loading native root certificates for: {}", host);
-        
         use rumqttc::tokio_rustls::rustls;
-        
         let mut root_store = rustls::RootCertStore::empty();
-        
-        for cert in rustls_native_certs::load_native_certs()
-            .context("Could not load platform certificates")? {
+        for cert in rustls_native_certs::load_native_certs().context("Could not load platform certificates")? {
             root_store.add(cert)?;
         }
-
         let tls_config = rustls::ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth();
-
         mqttoptions.set_transport(Transport::tls_with_config(tls_config.into()));
     }
 
@@ -55,24 +121,22 @@ async fn main() -> Result<()> {
 
     let registry = Registry::new();
     let mut metrics_map = HashMap::new();
-    let topics = vec![
-        ("$SYS/broker/clients/connected", "mqtt_clients_connected", "Connected clients"),
-        ("$SYS/broker/uptime", "mqtt_uptime_seconds", "Broker uptime"),
-        ("$SYS/broker/memory/current", "mqtt_memory_bytes", "Memory usage"),
-    ];
 
-    for (topic, name, help) in topics {
-        let gauge = Gauge::new(name, help)?;
+    for cfg in metrics_configs {
+        let gauge = Gauge::new(&cfg.name, &cfg.help)?;
         registry.register(Box::new(gauge.clone()))?;
-        metrics_map.insert(topic.to_string(), gauge);
+        metrics_map.insert(cfg.topic.clone(), gauge);
     }
 
+    let registry = Arc::new(registry);
     let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
     for topic in metrics_map.keys() {
         client.subscribe(topic, QoS::AtMostOnce).await?;
     }
 
     let metrics_for_task = metrics_map.clone();
+    let re = Regex::new(r"(\d+\.?\d*)")?;
+
     tokio::spawn(async move {
         loop {
             match eventloop.poll().await {
@@ -80,8 +144,10 @@ async fn main() -> Result<()> {
                     if let Event::Incoming(Packet::Publish(publish)) = notification {
                         if let Some(gauge) = metrics_for_task.get(&publish.topic) {
                             let payload = String::from_utf8_lossy(&publish.payload);
-                            if let Ok(val) = payload.trim().parse::<f64>() {
-                                gauge.set(val);
+                            if let Some(caps) = re.captures(&payload) {
+                                if let Ok(val) = caps[1].parse::<f64>() {
+                                    gauge.set(val);
+                                }
                             }
                         }
                     }
@@ -94,15 +160,15 @@ async fn main() -> Result<()> {
         }
     });
 
-    let prometheus = PrometheusMetricsBuilder::new("mosquitto_exporter")
-        .registry(registry)
-        .endpoint("/metrics")
-        .build()?;
+    let registry_data = web::Data::from(registry);
 
-    info!("Metrics server at http://0.0.0.0:{}/metrics", http_port);
-    HttpServer::new(move || App::new().wrap(prometheus.clone()))
-        .bind(("0.0.0.0", http_port))?
-        .run()
-        .await
-        .context("Server crash")
+    HttpServer::new(move || {
+        App::new()
+            .app_data(registry_data.clone())
+            .service(metrics_handler)
+    })
+    .bind(("0.0.0.0", http_port))?
+    .run()
+    .await
+    .context("Server crash")
 }
