@@ -1,0 +1,18 @@
+[package]
+name = "mosquitto-prometheus-exporter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+actix-web = "4"
+actix-web-prometheus = "0.1.2"
+tokio = { version = "1", features = ["full"] }
+rumqttc = { version = "0.24", features = ["use-rustls"] }
+prometheus = "0.13"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+dotenvy = "0.15"
+#rustls = "0.23" # Add this explicitly
+rustls-native-certs = "0.7"
+#tokio-rustls = "0.26" # Required for the .into() conversion to work
