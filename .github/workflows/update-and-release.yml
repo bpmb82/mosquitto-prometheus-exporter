@@ -1,0 +1,112 @@
+name: Update and release
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build-and-release:
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.get_ver.outputs.version }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: amd64
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Bump version
+        if: matrix.arch == 'amd64'
+        id: bump
+        run: |
+          current_version=$(grep "^version =" Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          IFS='.' read -r major minor patch <<< "$current_version"
+          new_version="$major.$minor.$((patch + 1))"
+          sed -i "s/^version = \"$current_version\"/version = \"$new_version\"/" Cargo.toml
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml
+          git commit -m "chore: bump version to $new_version [skip ci]"
+          git push
+          echo "version=$new_version" >> $GITHUB_OUTPUT
+        
+      - name: Get Version for other runners
+        id: get_ver
+        run: |
+          # Zorg dat alle matrix-jobs de nieuwste versie weten
+          sleep 5 && git pull
+          echo "version=$(grep "^version =" Cargo.toml | sed 's/version = "\(.*\)"/\1/')" >> $GITHUB_OUTPUT
+
+      - name: Install Cross
+        run: cargo install cross --git https://github.com/cross-rs/cross.git
+
+      - name: Build Binary
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Prepare for Docker
+        run: |
+          mkdir -p bin-${{ matrix.arch }}
+          cp target/${{ matrix.target }}/release/mosquitto-prometheus-exporter bin-${{ matrix.arch }}/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.arch }}
+          path: bin-${{ matrix.arch }}/
+
+  docker-and-release:
+    needs: build-and-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ vars.DOCKERHUB_USERNAME }}/mosquitto-exporter:latest
+            ${{ vars.DOCKERHUB_USERNAME }}/mosquitto-exporter:${{ needs.build-and-release.outputs.new_version }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.build-and-release.outputs.new_version }}
+          files: |
+            bin-amd64/mosquitto-prometheus-exporter
+            bin-arm64/mosquitto-prometheus-exporter
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

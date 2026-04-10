@@ -67,13 +67,22 @@ fn get_default_metrics() -> Vec<MetricConfig> {
     ]
 }
 
-#[get("/metrics")]
+#[get("/")]
 async fn metrics_handler(registry: web::Data<Registry>) -> impl Responder {
     let encoder = TextEncoder::new();
     let mut buffer = Vec::new();
     let metric_families = registry.gather();
-    encoder.encode(&metric_families, &mut buffer).unwrap();
-    HttpResponse::Ok().content_type("text/plain").body(buffer)
+
+    // Vervang .unwrap() door een match of result-afhandeling
+    if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
+        error!("Could not encode prometheus metrics: {}", e);
+        return HttpResponse::InternalServerError()
+            .body("Error encoding metrics");
+    }
+
+    HttpResponse::Ok()
+        .content_type("text/plain")
+        .body(buffer)
 }
 
 #[tokio::main]
@@ -106,9 +115,12 @@ async fn main() -> Result<()> {
     if is_tls {
         use rumqttc::tokio_rustls::rustls;
         let mut root_store = rustls::RootCertStore::empty();
-        for cert in rustls_native_certs::load_native_certs().context("Could not load platform certificates")? {
-            root_store.add(cert)?;
-        }
+        root_store.extend(
+            webpki_roots::TLS_SERVER_ROOTS
+                .iter()
+                .cloned()
+        );
+        
         let tls_config = rustls::ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth();
@@ -167,6 +179,7 @@ async fn main() -> Result<()> {
             .app_data(registry_data.clone())
             .service(metrics_handler)
     })
+    .workers(2)
     .bind(("0.0.0.0", http_port))?
     .run()
     .await

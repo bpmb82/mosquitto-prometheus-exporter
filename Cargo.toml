@@ -7,13 +7,14 @@ edition = "2024"
 actix-web = "4"
 actix-web-prometheus = "0.1.2"
 tokio = { version = "1", features = ["full"] }
-rumqttc = { version = "0.24", features = ["use-rustls"] }
-prometheus = "0.13"
+rumqttc = { version = "0.25", features = ["use-rustls"] }
+prometheus = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 dotenvy = "0.15"
-rustls-native-certs = "0.7"
+rustls-native-certs = "0.8"
+webpki-roots = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 regex = "1"
