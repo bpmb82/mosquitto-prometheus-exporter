@@ -53,6 +53,8 @@ You can configure the exporter via a .env file or system environment variables:
 
 ## Usage
 
+### CLI
+
 Run the compiled binary:
 ```
 ./mosquitto-prometheus-exporter
@@ -60,6 +62,13 @@ Run the compiled binary:
 
 Access your metrics at:
 http://localhost:9090/metrics
+
+### Docker
+
+Run the docker image:
+```
+docker run -ti -e "MQTT_HOST=tls://mosquitto.remotehome.cloud" -e "MQTT_PORT=8883" -p "9090:9090" bpmbee/mosquitto-exporter:latest
+```
 
 ## Prometheus Integration
 
