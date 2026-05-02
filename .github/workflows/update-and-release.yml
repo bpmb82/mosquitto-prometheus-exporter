@@ -48,7 +48,7 @@ jobs:
       - uses: swatinem/rust-cache@v2
       
       - name: Install Cross
-        run: cargo install cross --target x86_64-unknown-linux-musl # Veel sneller dan vanaf git
+        uses: taiki-e/install-action@cross
 
       - name: Build
         run: cross build --release --target ${{ matrix.target }}
