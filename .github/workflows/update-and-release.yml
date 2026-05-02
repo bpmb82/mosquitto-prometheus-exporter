@@ -46,6 +46,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: "cross-${{ matrix.target }}"
       
       - name: Install Cross
         uses: taiki-e/install-action@cross
