@@ -67,7 +67,7 @@ http://localhost:9090/metrics
 
 Run the docker image:
 ```
-docker run -ti -e "MQTT_HOST=tls://mosquitto.remotehome.cloud" -e "MQTT_PORT=8883" -p "9090:9090" bpmbee/mosquitto-exporter:latest
+docker run -ti -e "MQTT_HOST=tls://example.com" -e "MQTT_PORT=8883" -p "9090:9090" bpmbee/mosquitto-exporter:latest
 ```
 
 ## Prometheus Integration
